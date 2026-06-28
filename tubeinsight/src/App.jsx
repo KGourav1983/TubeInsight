@@ -94,6 +94,224 @@ function Section({ title, icon, children }) {
   );
 }
 
+// --- Comment Sentiment Miner Component ---
+function CommentMiner({ videoId, apiKey }) {
+  const [analysis, setAnalysis] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [activeCluster, setActiveCluster] = useState(null);
+
+  async function fetchComments() {
+    const res = await fetch(
+      `https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId=${videoId}&maxResults=100&order=relevance&key=${apiKey}`
+    );
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return (data.items || []).map(item =>
+      item.snippet.topLevelComment.snippet.textDisplay
+        .replace(/<[^>]+>/g, "") // strip HTML
+        .slice(0, 200)
+    );
+  }
+
+  async function mineComments() {
+    setLoading(true);
+    setError("");
+    try {
+      const comments = await fetchComments();
+      if (!comments.length) throw new Error("No comments found on this video.");
+
+      const prompt = `You are a YouTube audience analyst. Analyze these ${comments.length} comments from a YouTube video and find patterns, themes, and sentiments.
+
+COMMENTS:
+${comments.map((c, i) => `${i + 1}. ${c}`).join("\n")}
+
+Respond ONLY with valid JSON (no markdown, no backticks):
+{
+  "overallSentiment": "positive" | "mixed" | "negative",
+  "sentimentScore": <0-100, where 100 is most positive>,
+  "summary": "2-3 sentence overview of how the audience responded",
+  "clusters": [
+    {
+      "theme": "Short theme name (max 4 words)",
+      "emoji": "one relevant emoji",
+      "percentage": <estimated % of comments about this>,
+      "sentiment": "positive" | "neutral" | "negative",
+      "insight": "1-2 sentences explaining what viewers are saying about this theme",
+      "exampleComments": ["paraphrased example 1", "paraphrased example 2"]
+    }
+  ],
+  "creatorOpportunities": [
+    "Specific action the creator should take based on comment patterns"
+  ],
+  "mostRequestedContent": ["topic 1", "topic 2", "topic 3"],
+  "commonPraise": ["what viewers loved 1", "what viewers loved 2"],
+  "commonCriticism": ["complaint 1", "complaint 2"]
+}
+
+Identify 4-6 clusters. Be specific and data-driven. Paraphrase comments, never quote directly.`;
+
+      const text = await callOpenRouter([{ role: "user", content: prompt }]);
+      const result = parseJSON(text);
+      setAnalysis(result);
+      setActiveCluster(0);
+    } catch (e) {
+      setError(e.message);
+    }
+    setLoading(false);
+  }
+
+  const sentimentColor = s => s === "positive" ? "#22c55e" : s === "negative" ? "#ef4444" : "#f59e0b";
+  const sentimentBg = s => s === "positive" ? "#052e16" : s === "negative" ? "#2d1515" : "#2d1f05";
+  const sentimentBorder = s => s === "positive" ? "#166534" : s === "negative" ? "#7f1d1d" : "#854d0e";
+
+  return (
+    <Section title="Comment Sentiment Mining" icon="💬">
+      {!analysis && !loading && (
+        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "#64748b", fontSize: 13, lineHeight: 1.7, marginBottom: 16 }}>
+              Fetches your top 100 comments and uses AI to cluster them into themes — revealing what viewers loved, what they complained about, and what content they're asking for next.
+            </div>
+            <button onClick={mineComments} style={{
+              background: "linear-gradient(135deg, #0891b2, #6366f1)",
+              border: "none", borderRadius: 10, color: "#fff",
+              padding: "12px 24px", fontSize: 14, fontWeight: 700, cursor: "pointer"
+            }}>
+              💬 Mine Comments
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading && (
+        <div style={{ color: "#6366f1", fontSize: 14, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 20, animation: "spin 1s linear infinite" }}>⏳</span>
+          Fetching comments and analyzing sentiment patterns...
+        </div>
+      )}
+
+      {error && (
+        <div style={{ color: "#fca5a5", fontSize: 13, background: "#1c0a0a", border: "1px solid #7f1d1d", borderRadius: 8, padding: 12 }}>{error}</div>
+      )}
+
+      {analysis && (
+        <div>
+          {/* Overall sentiment bar */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
+            <div style={{ textAlign: "center" }}>
+              <ScoreRing score={analysis.sentimentScore} size={80} />
+              <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Sentiment</div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 8,
+                background: sentimentBg(analysis.overallSentiment),
+                border: `1px solid ${sentimentBorder(analysis.overallSentiment)}`,
+                borderRadius: 20, padding: "4px 14px", marginBottom: 10
+              }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: sentimentColor(analysis.overallSentiment) }} />
+                <span style={{ fontSize: 12, fontWeight: 700, color: sentimentColor(analysis.overallSentiment), textTransform: "capitalize" }}>
+                  {analysis.overallSentiment} audience
+                </span>
+              </div>
+              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.7 }}>{analysis.summary}</div>
+            </div>
+          </div>
+
+          {/* Clusters */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Comment Clusters</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              {analysis.clusters.map((c, i) => (
+                <button key={i} onClick={() => setActiveCluster(i)} style={{
+                  background: activeCluster === i ? sentimentBg(c.sentiment) : "#1e293b",
+                  border: `1px solid ${activeCluster === i ? sentimentBorder(c.sentiment) : "#334155"}`,
+                  borderRadius: 10, padding: "8px 14px", cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 8
+                }}>
+                  <span style={{ fontSize: 16 }}>{c.emoji}</span>
+                  <div style={{ textAlign: "left" }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: activeCluster === i ? sentimentColor(c.sentiment) : "#94a3b8" }}>{c.theme}</div>
+                    <div style={{ fontSize: 11, color: "#475569" }}>{c.percentage}% of comments</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {/* Active cluster detail */}
+            {activeCluster !== null && analysis.clusters[activeCluster] && (() => {
+              const c = analysis.clusters[activeCluster];
+              return (
+                <div style={{
+                  background: sentimentBg(c.sentiment),
+                  border: `1px solid ${sentimentBorder(c.sentiment)}`,
+                  borderRadius: 12, padding: 20
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                    <span style={{ fontSize: 24 }}>{c.emoji}</span>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 15, color: sentimentColor(c.sentiment) }}>{c.theme}</div>
+                      <div style={{ fontSize: 12, color: "#64748b" }}>{c.percentage}% of comments · {c.sentiment}</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.7, marginBottom: 14 }}>{c.insight}</div>
+                  <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>Example comments</div>
+                  {c.exampleComments.map((ex, j) => (
+                    <div key={j} style={{
+                      background: "#020617", border: "1px solid #1e293b",
+                      borderRadius: 8, padding: "8px 12px", marginBottom: 6,
+                      fontSize: 13, color: "#cbd5e1", fontStyle: "italic"
+                    }}>
+                      "{ex}"
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* 3 column insights */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
+            {/* Praise */}
+            <div style={{ background: "#052e16", border: "1px solid #166534", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "#4ade80", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>👏 WHAT THEY LOVED</div>
+              {analysis.commonPraise.map((p, i) => (
+                <div key={i} style={{ color: "#86efac", fontSize: 12, marginBottom: 6, lineHeight: 1.5 }}>• {p}</div>
+              ))}
+            </div>
+            {/* Criticism */}
+            <div style={{ background: "#2d1515", border: "1px solid #7f1d1d", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "#fca5a5", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>😤 COMMON COMPLAINTS</div>
+              {analysis.commonCriticism.map((c, i) => (
+                <div key={i} style={{ color: "#fca5a5", fontSize: 12, marginBottom: 6, lineHeight: 1.5 }}>• {c}</div>
+              ))}
+            </div>
+            {/* Requests */}
+            <div style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "#60a5fa", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>🙋 CONTENT REQUESTS</div>
+              {analysis.mostRequestedContent.map((r, i) => (
+                <div key={i} style={{ color: "#93c5fd", fontSize: 12, marginBottom: 6, lineHeight: 1.5 }}>• {r}</div>
+              ))}
+            </div>
+          </div>
+
+          {/* Creator opportunities */}
+          <div style={{ background: "linear-gradient(135deg, #1e1b4b, #1e1052)", border: "1px solid #312e81", borderRadius: 12, padding: 16 }}>
+            <div style={{ color: "#818cf8", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>🚀 WHAT TO DO NEXT</div>
+            {analysis.creatorOpportunities.map((opp, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, marginBottom: 8, alignItems: "flex-start" }}>
+                <span style={{ color: "#6366f1", fontWeight: 700, fontSize: 14, flexShrink: 0 }}>{i + 1}.</span>
+                <span style={{ color: "#c7d2fe", fontSize: 13, lineHeight: 1.6 }}>{opp}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 // --- Thumbnail Scorer Component ---
 function ThumbnailScorer({ thumbnailUrl, videoTitle }) {
   const [thumbAnalysis, setThumbAnalysis] = useState(null);
@@ -472,13 +690,16 @@ Engagement Rate: ${engagementRate}%
               </div>
             </Section>
 
-            {/* 🖼️ THUMBNAIL SCORER — new! */}
+            {/* 🖼️ Thumbnail Scorer */}
             {v.snippet.thumbnails?.high?.url && (
               <ThumbnailScorer
                 thumbnailUrl={v.snippet.thumbnails.high.url}
                 videoTitle={v.snippet.title}
               />
             )}
+
+            {/* 💬 Comment Sentiment Miner */}
+            <CommentMiner videoId={extractVideoId(url)} apiKey={apiKey} />
 
             {/* What Worked */}
             <Section title="What Worked" icon="✅">
