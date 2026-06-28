@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-//const CLAUDE_MODEL = "claude-sonnet-4-6";
+const OPENROUTER_KEY = import.meta.env.VITE_OPENROUTER_KEY;
 
 // --- Helpers ---
 function extractVideoId(url) {
@@ -23,6 +23,31 @@ function formatNumber(n) {
   return num.toString();
 }
 
+async function callOpenRouter(messages, model = "openai/gpt-4o-mini") {
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENROUTER_KEY}`,
+      "HTTP-Referer": "http://localhost:5173",
+      "X-Title": "TubeInsight"
+    },
+    body: JSON.stringify({ model, max_tokens: 1500, messages })
+  });
+  const data = await response.json();
+  console.log("OpenRouter response:", data);
+  if (data.error) throw new Error(data.error.message);
+  const text = data.choices?.[0]?.message?.content || "";
+  if (!text) throw new Error("Empty response from AI");
+  return text;
+}
+
+function parseJSON(text) {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("No JSON in response: " + text.slice(0, 200));
+  return JSON.parse(match[0]);
+}
+
 function ScoreRing({ score, size = 80 }) {
   const r = size / 2 - 8;
   const circ = 2 * Math.PI * r;
@@ -30,59 +55,217 @@ function ScoreRing({ score, size = 80 }) {
   const color = score >= 75 ? "#22c55e" : score >= 50 ? "#f59e0b" : "#ef4444";
   return (
     <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#1e293b" strokeWidth="8" />
-      <circle
-        cx={size / 2} cy={size / 2} r={r} fill="none"
-        stroke={color} strokeWidth="8"
-        strokeDasharray={`${dash} ${circ}`}
-        strokeLinecap="round"
-        style={{ transition: "stroke-dasharray 1s ease" }}
-      />
-      <text
-        x="50%" y="50%"
-        textAnchor="middle" dominantBaseline="middle"
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#1e293b" strokeWidth="8" />
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="8"
+        strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
+        style={{ transition: "stroke-dasharray 1s ease" }} />
+      <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle"
         fill={color} fontSize={size * 0.22} fontWeight="700"
-        style={{ transform: "rotate(90deg)", transformOrigin: "center" }}
-      >
+        style={{ transform: "rotate(90deg)", transformOrigin: "center" }}>
         {score}
       </text>
     </svg>
   );
 }
 
-function StatCard({ label, value, sub }) {
+function StatCard({ label, value }) {
   return (
-    <div style={{
-      background: "#0f172a", border: "1px solid #1e293b",
-      borderRadius: 12, padding: "16px 20px", flex: 1, minWidth: 120
-    }}>
+    <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "16px 20px", flex: 1, minWidth: 100 }}>
       <div style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
       <div style={{ color: "#f8fafc", fontSize: 22, fontWeight: 700, marginTop: 4 }}>{value}</div>
-      {sub && <div style={{ color: "#475569", fontSize: 11, marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
 
-function Tag({ children, color = "#334155" }) {
+function Tag({ children }) {
   return (
-    <span style={{
-      background: color, color: "#f1f5f9", fontSize: 11,
-      padding: "3px 10px", borderRadius: 20, display: "inline-block", margin: "2px 3px"
-    }}>{children}</span>
+    <span style={{ background: "#1e293b", color: "#f1f5f9", fontSize: 11, padding: "3px 10px", borderRadius: 20, display: "inline-block", margin: "2px 3px" }}>{children}</span>
   );
 }
 
 function Section({ title, icon, children }) {
   return (
-    <div style={{
-      background: "#0f172a", border: "1px solid #1e293b",
-      borderRadius: 16, padding: 24, marginBottom: 16
-    }}>
+    <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 16, padding: 24, marginBottom: 16 }}>
       <div style={{ color: "#94a3b8", fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
         <span>{icon}</span>{title}
       </div>
       {children}
     </div>
+  );
+}
+
+// --- Thumbnail Scorer Component ---
+function ThumbnailScorer({ thumbnailUrl, videoTitle }) {
+  const [thumbAnalysis, setThumbAnalysis] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function analyzeThumbnail() {
+    setLoading(true);
+    setError("");
+    try {
+      const prompt = `You are an expert YouTube thumbnail analyst. Analyze this thumbnail image for the video titled "${videoTitle}".
+
+Evaluate it across these dimensions and respond ONLY with valid JSON (no markdown, no backticks):
+{
+  "overallScore": <0-100>,
+  "scores": {
+    "contrast": <0-100>,
+    "text": <0-100>,
+    "faces": <0-100>,
+    "emotion": <0-100>,
+    "clarity": <0-100>
+  },
+  "scoreReasons": {
+    "contrast": "one sentence why",
+    "text": "one sentence why",
+    "faces": "one sentence why",
+    "emotion": "one sentence why",
+    "clarity": "one sentence why"
+  },
+  "strengths": ["strength 1", "strength 2"],
+  "weaknesses": ["weakness 1", "weakness 2"],
+  "improvements": ["specific fix 1", "specific fix 2", "specific fix 3"],
+  "verdict": "One punchy sentence summarizing the thumbnail's biggest opportunity"
+}
+
+Score explanations:
+- contrast: color contrast and visual pop on dark/light backgrounds
+- text: readability, size, font choice, amount of text
+- faces: presence of expressive human faces (boosts CTR significantly)
+- emotion: emotional impact — does it make you curious or want to click?
+- clarity: is the main subject immediately obvious at small size?`;
+
+      const text = await callOpenRouter([
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: thumbnailUrl } },
+            { type: "text", text: prompt }
+          ]
+        }
+      ], "openai/gpt-4o"); // needs vision model
+
+      const analysis = parseJSON(text);
+      setThumbAnalysis(analysis);
+    } catch (e) {
+      setError(e.message);
+    }
+    setLoading(false);
+  }
+
+  const scoreLabels = { contrast: "Contrast", text: "Text", faces: "Faces", emotion: "Emotion", clarity: "Clarity" };
+  const scoreIcons = { contrast: "🎨", text: "🔤", faces: "😮", emotion: "⚡", clarity: "🔍" };
+
+  return (
+    <Section title="Thumbnail Scorer" icon="🖼️">
+      {/* Thumbnail preview */}
+      <div style={{ display: "flex", gap: 20, alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flexShrink: 0 }}>
+          <img src={thumbnailUrl} alt="thumbnail"
+            style={{ width: 200, borderRadius: 10, display: "block", border: "1px solid #1e293b" }} />
+          {thumbAnalysis && (
+            <div style={{
+              position: "absolute", top: -10, right: -10,
+              background: thumbAnalysis.overallScore >= 75 ? "#22c55e" : thumbAnalysis.overallScore >= 50 ? "#f59e0b" : "#ef4444",
+              color: "#000", fontWeight: 800, fontSize: 16,
+              width: 44, height: 44, borderRadius: "50%",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              border: "3px solid #020617"
+            }}>
+              {thumbAnalysis.overallScore}
+            </div>
+          )}
+        </div>
+
+        <div style={{ flex: 1 }}>
+          {!thumbAnalysis && !loading && (
+            <div>
+              <div style={{ color: "#64748b", fontSize: 13, lineHeight: 1.7, marginBottom: 16 }}>
+                Uses GPT-4o Vision to actually <em>see</em> your thumbnail and score it on contrast, text readability, emotional impact, face presence, and visual clarity.
+              </div>
+              <button onClick={analyzeThumbnail} style={{
+                background: "linear-gradient(135deg, #7c3aed, #6366f1)",
+                border: "none", borderRadius: 10, color: "#fff",
+                padding: "12px 24px", fontSize: 14, fontWeight: 700, cursor: "pointer"
+              }}>
+                🔍 Score This Thumbnail
+              </button>
+            </div>
+          )}
+
+          {loading && (
+            <div style={{ color: "#6366f1", fontSize: 14, display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 20 }}>👁️</span> AI is analyzing your thumbnail...
+            </div>
+          )}
+
+          {error && (
+            <div style={{ color: "#fca5a5", fontSize: 13, background: "#1c0a0a", border: "1px solid #7f1d1d", borderRadius: 8, padding: 12 }}>
+              {error}
+            </div>
+          )}
+
+          {thumbAnalysis && (
+            <div>
+              <div style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic", marginBottom: 16, lineHeight: 1.6 }}>
+                "{thumbAnalysis.verdict}"
+              </div>
+              {/* Score bars */}
+              <div style={{ display: "grid", gap: 10 }}>
+                {Object.entries(thumbAnalysis.scores).map(([key, val]) => (
+                  <div key={key}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, color: "#94a3b8" }}>{scoreIcons[key]} {scoreLabels[key]}</span>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: val >= 70 ? "#22c55e" : val >= 45 ? "#f59e0b" : "#ef4444" }}>{val}/100</span>
+                    </div>
+                    <div style={{ background: "#1e293b", borderRadius: 4, height: 6 }}>
+                      <div style={{
+                        height: 6, borderRadius: 4, width: `${val}%`,
+                        background: val >= 70 ? "#22c55e" : val >= 45 ? "#f59e0b" : "#ef4444",
+                        transition: "width 1s ease"
+                      }} />
+                    </div>
+                    <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>{thumbAnalysis.scoreReasons[key]}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Strengths & Weaknesses */}
+      {thumbAnalysis && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div style={{ background: "#052e16", border: "1px solid #166534", borderRadius: 10, padding: 16 }}>
+            <div style={{ color: "#4ade80", fontSize: 12, fontWeight: 700, marginBottom: 10 }}>✓ STRENGTHS</div>
+            {thumbAnalysis.strengths.map((s, i) => (
+              <div key={i} style={{ color: "#86efac", fontSize: 13, marginBottom: 6, lineHeight: 1.5 }}>• {s}</div>
+            ))}
+          </div>
+          <div style={{ background: "#2d1515", border: "1px solid #7f1d1d", borderRadius: 10, padding: 16 }}>
+            <div style={{ color: "#fca5a5", fontSize: 12, fontWeight: 700, marginBottom: 10 }}>✗ WEAKNESSES</div>
+            {thumbAnalysis.weaknesses.map((w, i) => (
+              <div key={i} style={{ color: "#fca5a5", fontSize: 13, marginBottom: 6, lineHeight: 1.5 }}>• {w}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Improvements */}
+      {thumbAnalysis && (
+        <div style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", borderRadius: 10, padding: 16 }}>
+          <div style={{ color: "#60a5fa", fontSize: 12, fontWeight: 700, marginBottom: 10 }}>🛠 HOW TO IMPROVE IT</div>
+          {thumbAnalysis.improvements.map((imp, i) => (
+            <div key={i} style={{ display: "flex", gap: 10, marginBottom: 8, alignItems: "flex-start" }}>
+              <span style={{ color: "#3b82f6", fontWeight: 700, fontSize: 13, flexShrink: 0 }}>{i + 1}.</span>
+              <span style={{ color: "#93c5fd", fontSize: 13, lineHeight: 1.5 }}>{imp}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -107,91 +290,55 @@ export default function App() {
     return data.items[0];
   }
 
-  async function analyzeWithClaude(videoData) {
+  async function analyzeVideo(videoData) {
     const { snippet, statistics, contentDetails } = videoData;
     const engagementRate = statistics.viewCount > 0
       ? (((parseInt(statistics.likeCount || 0) + parseInt(statistics.commentCount || 0)) / parseInt(statistics.viewCount)) * 100).toFixed(2)
       : 0;
 
-    const prompt = `You are an expert YouTube content strategist analyzing a video. Give detailed, actionable insights.
+    const prompt = `You are an expert YouTube content strategist. Analyze this video and respond ONLY with valid JSON (no markdown, no backticks):
 
 VIDEO DATA:
 Title: ${snippet.title}
 Channel: ${snippet.channelTitle}
 Description (first 500 chars): ${snippet.description?.slice(0, 500)}
 Tags: ${snippet.tags?.join(", ") || "none"}
-Category: ${snippet.categoryId}
 Published: ${snippet.publishedAt}
 Duration: ${contentDetails.duration}
 Views: ${statistics.viewCount}
 Likes: ${statistics.likeCount || 0}
 Comments: ${statistics.commentCount || 0}
 Engagement Rate: ${engagementRate}%
-Thumbnail URL: ${snippet.thumbnails?.high?.url}
 
-Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) in this exact structure:
 {
-  "overallScore": <number 0-100>,
+  "overallScore": <0-100>,
   "scores": {
-    "title": <number 0-100>,
-    "seo": <number 0-100>,
-    "engagement": <number 0-100>,
-    "description": <number 0-100>,
-    "timing": <number 0-100>
+    "title": <0-100>,
+    "seo": <0-100>,
+    "engagement": <0-100>,
+    "description": <0-100>,
+    "timing": <0-100>
   },
-  "whatWorked": [
-    {"point": "short headline", "detail": "2 sentence explanation with data"}
-  ],
-  "whatToImprove": [
-    {"point": "short headline", "detail": "2 sentence explanation with specific fix"}
-  ],
-  "titleAlternatives": ["alt title 1", "alt title 2", "alt title 3"],
-  "improvedDescription": "A rewritten description opening (first 150 chars) with better hooks and keywords",
+  "whatWorked": [{"point": "headline", "detail": "2 sentence explanation"}],
+  "whatToImprove": [{"point": "headline", "detail": "2 sentence explanation with specific fix"}],
+  "titleAlternatives": ["title 1", "title 2", "title 3"],
+  "improvedDescription": "Rewritten description opening (150 chars) with better hook and keywords",
   "tagSuggestions": ["tag1", "tag2", "tag3", "tag4", "tag5"],
   "keyInsight": "One punchy sentence: the single biggest reason this video did or didn't perform well",
-  "uploadTimingNote": "Assessment of whether publish day/time was good or bad based on the date"
+  "uploadTimingNote": "Assessment of publish day/time and whether it was optimal"
 }`;
 
-    const OPENROUTER_KEY = import.meta.env.VITE_OPENROUTER_KEY;
-
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENROUTER_KEY}`,
-        "HTTP-Referer": "http://localhost:5173",
-        "X-Title": "TubeInsight"
-      },
-      body: JSON.stringify({
-        model: "openai/gpt-4o-mini",
-        max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    const data = await response.json();
-    console.log("OpenRouter response:", data);
-
-    if (data.error) throw new Error(data.error.message);
-
-    const text = data.choices?.[0]?.message?.content || "";
-    if (!text) throw new Error("Empty response from AI");
-
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found in response: " + text.slice(0, 200));
-
-    return JSON.parse(jsonMatch[0]);
-    
-    const clean = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
+    const text = await callOpenRouter([{ role: "user", content: prompt }]);
+    return parseJSON(text);
   }
 
   async function handleAnalyze() {
     setError("");
     setResult(null);
     const videoId = extractVideoId(url);
-    if (!videoId) { setError("Couldn't find a video ID in that URL. Try a standard YouTube link."); return; }
+    if (!videoId) { setError("Couldn't find a video ID in that URL."); return; }
     if (!apiKey) { setError("Please enter your YouTube Data API key."); return; }
+    if (!OPENROUTER_KEY) { setError("VITE_OPENROUTER_KEY not found in .env file."); return; }
 
     setLoading(true);
     try {
@@ -199,11 +346,12 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
       const videoData = await fetchYouTubeData(videoId);
 
       setStep("Running AI analysis...");
-      const analysis = await analyzeWithClaude(videoData);
+      const analysis = await analyzeVideo(videoData);
 
       setResult({ video: videoData, analysis });
     } catch (e) {
-      setError(e.message || "Something went wrong. Check your API key and try again.");
+      console.error(e);
+      setError(`Error: ${e.message}`);
     }
     setLoading(false);
     setStep("");
@@ -213,120 +361,60 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
   const a = result?.analysis;
 
   return (
-    <div style={{
-      minHeight: "100vh", background: "#020617",
-      fontFamily: "'Inter', system-ui, sans-serif", color: "#f8fafc",
-      padding: "0 0 60px"
-    }}>
+    <div style={{ minHeight: "100vh", background: "#020617", fontFamily: "'Inter', system-ui, sans-serif", color: "#f8fafc", padding: "0 0 60px" }}>
       {/* Header */}
-      <div style={{
-        borderBottom: "1px solid #0f172a", padding: "20px 32px",
-        display: "flex", alignItems: "center", justifyContent: "space-between"
-      }}>
+      <div style={{ borderBottom: "1px solid #0f172a", padding: "20px 32px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{
-            background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-            borderRadius: 10, width: 36, height: 36,
-            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18
-          }}>▶</div>
+          <div style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)", borderRadius: 10, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>▶</div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 16, color: "#f8fafc" }}>TubeInsight</div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>TubeInsight</div>
             <div style={{ fontSize: 11, color: "#475569" }}>AI-powered video analytics</div>
           </div>
         </div>
-        <div style={{
-          background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-          fontSize: 11, padding: "4px 12px", borderRadius: 20, fontWeight: 600
-        }}>BETA</div>
+        <div style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)", fontSize: 11, padding: "4px 12px", borderRadius: 20, fontWeight: 600 }}>BETA</div>
       </div>
 
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "40px 20px 0" }}>
 
-        {/* Hero */}
         {!result && (
           <div style={{ textAlign: "center", marginBottom: 40 }}>
-            <div style={{ fontSize: 13, color: "#6366f1", fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", marginBottom: 12 }}>
-              For YouTube Creators
-            </div>
+            <div style={{ fontSize: 13, color: "#6366f1", fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", marginBottom: 12 }}>For YouTube Creators</div>
             <h1 style={{ fontSize: 38, fontWeight: 800, lineHeight: 1.15, margin: "0 0 14px", background: "linear-gradient(135deg, #f8fafc, #94a3b8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
               Why did your video perform<br />the way it did?
             </h1>
             <p style={{ color: "#64748b", fontSize: 16, maxWidth: 460, margin: "0 auto" }}>
-              Paste any YouTube URL. Get an AI breakdown of what worked, what didn't, and exactly how to fix it.
+              Paste any YouTube URL. Get an AI breakdown of what worked, what didn't, and exactly how to fix it — including a thumbnail vision score.
             </p>
           </div>
         )}
 
         {/* Input Card */}
-        <div style={{
-          background: "#0f172a", border: "1px solid #1e293b",
-          borderRadius: 20, padding: 28, marginBottom: 24
-        }}>
+        <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 20, padding: 28, marginBottom: 24 }}>
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 6 }}>YouTube Video URL</label>
-            <input
-              value={url}
-              onChange={e => setUrl(e.target.value)}
+            <input value={url} onChange={e => setUrl(e.target.value)}
               placeholder="https://youtube.com/watch?v=... or https://youtu.be/..."
-              style={{
-                width: "100%", background: "#020617", border: "1px solid #1e293b",
-                borderRadius: 10, padding: "12px 16px", color: "#f8fafc",
-                fontSize: 14, outline: "none", boxSizing: "border-box"
-              }}
-            />
+              style={{ width: "100%", background: "#020617", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 16px", color: "#f8fafc", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
           </div>
 
           <div style={{ marginBottom: 20 }}>
             <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 6 }}>
               YouTube Data API Key
-              <span
-                onClick={() => setShowApiKey(!showApiKey)}
-                style={{ color: "#6366f1", cursor: "pointer", marginLeft: 8 }}
-              >
-                {showApiKey ? "hide" : "show"}
-              </span>
-              <a
-                href="https://console.cloud.google.com/apis/credentials"
-                target="_blank"
-                rel="noreferrer"
-                style={{ color: "#475569", fontSize: 11, marginLeft: 8 }}
-              >Get one free →</a>
+              <span onClick={() => setShowApiKey(!showApiKey)} style={{ color: "#6366f1", cursor: "pointer", marginLeft: 8 }}>{showApiKey ? "hide" : "show"}</span>
+              <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{ color: "#475569", fontSize: 11, marginLeft: 8 }}>Get one free →</a>
             </label>
-            <input
-              value={apiKey}
-              onChange={e => setApiKey(e.target.value)}
-              type={showApiKey ? "text" : "password"}
-              placeholder="AIza..."
-              style={{
-                width: "100%", background: "#020617", border: "1px solid #1e293b",
-                borderRadius: 10, padding: "12px 16px", color: "#f8fafc",
-                fontSize: 14, outline: "none", boxSizing: "border-box"
-              }}
-            />
-            <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
-              Your key is never stored. Enable "YouTube Data API v3" in Google Cloud Console.
-            </div>
+            <input value={apiKey} onChange={e => setApiKey(e.target.value)}
+              type={showApiKey ? "text" : "password"} placeholder="AIza..."
+              style={{ width: "100%", background: "#020617", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 16px", color: "#f8fafc", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>Your key is never stored. Enable "YouTube Data API v3" in Google Cloud Console.</div>
           </div>
 
           {error && (
-            <div style={{
-              background: "#1c0a0a", border: "1px solid #7f1d1d",
-              borderRadius: 10, padding: "12px 16px", color: "#fca5a5",
-              fontSize: 13, marginBottom: 16
-            }}>{error}</div>
+            <div style={{ background: "#1c0a0a", border: "1px solid #7f1d1d", borderRadius: 10, padding: "12px 16px", color: "#fca5a5", fontSize: 13, marginBottom: 16 }}>{error}</div>
           )}
 
-          <button
-            onClick={handleAnalyze}
-            disabled={loading || !url}
-            style={{
-              width: "100%", padding: "14px",
-              background: loading ? "#1e293b" : "linear-gradient(135deg, #6366f1, #8b5cf6)",
-              border: "none", borderRadius: 12, color: "#fff",
-              fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
-              transition: "opacity 0.2s"
-            }}
-          >
+          <button onClick={handleAnalyze} disabled={loading || !url}
+            style={{ width: "100%", padding: "14px", background: loading ? "#1e293b" : "linear-gradient(135deg, #6366f1, #8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer" }}>
             {loading ? `⏳ ${step}` : "✦ Analyze Video"}
           </button>
         </div>
@@ -335,19 +423,12 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
         {result && (
           <div>
             {/* Video Info */}
-            <div style={{
-              background: "#0f172a", border: "1px solid #1e293b",
-              borderRadius: 16, padding: 24, marginBottom: 16,
-              display: "flex", gap: 16, alignItems: "flex-start"
-            }}>
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 16, padding: 24, marginBottom: 16, display: "flex", gap: 16, alignItems: "flex-start" }}>
               {v.snippet.thumbnails?.medium?.url && (
-                <img src={v.snippet.thumbnails.medium.url} alt="thumbnail"
-                  style={{ width: 140, borderRadius: 10, flexShrink: 0 }} />
+                <img src={v.snippet.thumbnails.medium.url} alt="thumbnail" style={{ width: 140, borderRadius: 10, flexShrink: 0 }} />
               )}
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.4, marginBottom: 8 }}>
-                  {v.snippet.title}
-                </div>
+                <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.4, marginBottom: 8 }}>{v.snippet.title}</div>
                 <div style={{ color: "#64748b", fontSize: 13, marginBottom: 12 }}>
                   {v.snippet.channelTitle} · {new Date(v.snippet.publishedAt).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}
                 </div>
@@ -360,12 +441,7 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
             </div>
 
             {/* Key Insight */}
-            <div style={{
-              background: "linear-gradient(135deg, #1e1b4b, #1e1052)",
-              border: "1px solid #312e81", borderRadius: 16,
-              padding: "20px 24px", marginBottom: 16,
-              display: "flex", alignItems: "center", gap: 16
-            }}>
+            <div style={{ background: "linear-gradient(135deg, #1e1b4b, #1e1052)", border: "1px solid #312e81", borderRadius: 16, padding: "20px 24px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
               <div style={{ fontSize: 28 }}>💡</div>
               <div>
                 <div style={{ fontSize: 11, color: "#818cf8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Key Insight</div>
@@ -388,12 +464,7 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
                         <span style={{ fontSize: 12, fontWeight: 700, color: val >= 70 ? "#22c55e" : val >= 45 ? "#f59e0b" : "#ef4444" }}>{val}</span>
                       </div>
                       <div style={{ background: "#1e293b", borderRadius: 4, height: 6 }}>
-                        <div style={{
-                          height: 6, borderRadius: 4,
-                          width: `${val}%`,
-                          background: val >= 70 ? "#22c55e" : val >= 45 ? "#f59e0b" : "#ef4444",
-                          transition: "width 1s ease"
-                        }} />
+                        <div style={{ height: 6, borderRadius: 4, width: `${val}%`, background: val >= 70 ? "#22c55e" : val >= 45 ? "#f59e0b" : "#ef4444", transition: "width 1s ease" }} />
                       </div>
                     </div>
                   ))}
@@ -401,19 +472,19 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
               </div>
             </Section>
 
+            {/* 🖼️ THUMBNAIL SCORER — new! */}
+            {v.snippet.thumbnails?.high?.url && (
+              <ThumbnailScorer
+                thumbnailUrl={v.snippet.thumbnails.high.url}
+                videoTitle={v.snippet.title}
+              />
+            )}
+
             {/* What Worked */}
             <Section title="What Worked" icon="✅">
               {a.whatWorked.map((w, i) => (
-                <div key={i} style={{
-                  display: "flex", gap: 12, marginBottom: i < a.whatWorked.length - 1 ? 16 : 0,
-                  paddingBottom: i < a.whatWorked.length - 1 ? 16 : 0,
-                  borderBottom: i < a.whatWorked.length - 1 ? "1px solid #1e293b" : "none"
-                }}>
-                  <div style={{
-                    width: 28, height: 28, background: "#052e16", border: "1px solid #166534",
-                    borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 13, flexShrink: 0
-                  }}>✓</div>
+                <div key={i} style={{ display: "flex", gap: 12, marginBottom: i < a.whatWorked.length - 1 ? 16 : 0, paddingBottom: i < a.whatWorked.length - 1 ? 16 : 0, borderBottom: i < a.whatWorked.length - 1 ? "1px solid #1e293b" : "none" }}>
+                  <div style={{ width: 28, height: 28, background: "#052e16", border: "1px solid #166534", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>✓</div>
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 14, color: "#4ade80", marginBottom: 4 }}>{w.point}</div>
                     <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{w.detail}</div>
@@ -425,16 +496,8 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
             {/* What to Improve */}
             <Section title="What to Improve" icon="🔧">
               {a.whatToImprove.map((w, i) => (
-                <div key={i} style={{
-                  display: "flex", gap: 12, marginBottom: i < a.whatToImprove.length - 1 ? 16 : 0,
-                  paddingBottom: i < a.whatToImprove.length - 1 ? 16 : 0,
-                  borderBottom: i < a.whatToImprove.length - 1 ? "1px solid #1e293b" : "none"
-                }}>
-                  <div style={{
-                    width: 28, height: 28, background: "#2d1515", border: "1px solid #7f1d1d",
-                    borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 13, flexShrink: 0
-                  }}>!</div>
+                <div key={i} style={{ display: "flex", gap: 12, marginBottom: i < a.whatToImprove.length - 1 ? 16 : 0, paddingBottom: i < a.whatToImprove.length - 1 ? 16 : 0, borderBottom: i < a.whatToImprove.length - 1 ? "1px solid #1e293b" : "none" }}>
+                  <div style={{ width: 28, height: 28, background: "#2d1515", border: "1px solid #7f1d1d", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>!</div>
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 14, color: "#fca5a5", marginBottom: 4 }}>{w.point}</div>
                     <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{w.detail}</div>
@@ -449,48 +512,25 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
                 Original: <span style={{ color: "#94a3b8" }}>"{v.snippet.title}"</span>
               </div>
               {a.titleAlternatives.map((t, i) => (
-                <div key={i} style={{
-                  background: "#020617", border: "1px solid #1e293b",
-                  borderRadius: 10, padding: "12px 16px", marginBottom: 8,
-                  display: "flex", justifyContent: "space-between", alignItems: "center"
-                }}>
+                <div key={i} style={{ background: "#020617", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 16px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 14, color: "#e2e8f0" }}>{t}</span>
-                  <button
-                    onClick={() => navigator.clipboard.writeText(t)}
-                    style={{
-                      background: "#1e293b", border: "none", borderRadius: 6,
-                      color: "#94a3b8", fontSize: 11, padding: "4px 10px", cursor: "pointer"
-                    }}
-                  >Copy</button>
+                  <button onClick={() => navigator.clipboard.writeText(t)}
+                    style={{ background: "#1e293b", border: "none", borderRadius: 6, color: "#94a3b8", fontSize: 11, padding: "4px 10px", cursor: "pointer" }}>Copy</button>
                 </div>
               ))}
             </Section>
 
             {/* Tags */}
             <Section title="Suggested Tags" icon="🏷️">
-              <div>
-                {a.tagSuggestions.map((t, i) => (
-                  <Tag key={i} color="#1e293b">{t}</Tag>
-                ))}
-              </div>
+              <div>{a.tagSuggestions.map((t, i) => <Tag key={i}>{t}</Tag>)}</div>
             </Section>
 
             {/* Description */}
             <Section title="Improved Description Opening" icon="📝">
-              <div style={{
-                background: "#020617", border: "1px solid #1e293b",
-                borderRadius: 10, padding: 16, fontSize: 14, color: "#94a3b8",
-                lineHeight: 1.7, position: "relative"
-              }}>
+              <div style={{ background: "#020617", border: "1px solid #1e293b", borderRadius: 10, padding: 16, fontSize: 14, color: "#94a3b8", lineHeight: 1.7, position: "relative" }}>
                 {a.improvedDescription}
-                <button
-                  onClick={() => navigator.clipboard.writeText(a.improvedDescription)}
-                  style={{
-                    position: "absolute", top: 12, right: 12,
-                    background: "#1e293b", border: "none", borderRadius: 6,
-                    color: "#94a3b8", fontSize: 11, padding: "4px 10px", cursor: "pointer"
-                  }}
-                >Copy</button>
+                <button onClick={() => navigator.clipboard.writeText(a.improvedDescription)}
+                  style={{ position: "absolute", top: 12, right: 12, background: "#1e293b", border: "none", borderRadius: 6, color: "#94a3b8", fontSize: 11, padding: "4px 10px", cursor: "pointer" }}>Copy</button>
               </div>
             </Section>
 
@@ -499,24 +539,16 @@ Analyze this video and respond ONLY with valid JSON (no markdown, no backticks) 
               <div style={{ fontSize: 14, color: "#94a3b8", lineHeight: 1.7 }}>{a.uploadTimingNote}</div>
             </Section>
 
-            {/* Analyze another */}
-            <button
-              onClick={() => { setResult(null); setUrl(""); setError(""); }}
-              style={{
-                width: "100%", padding: 14, background: "transparent",
-                border: "1px solid #1e293b", borderRadius: 12, color: "#64748b",
-                fontSize: 14, cursor: "pointer", marginTop: 8
-              }}
-            >
+            <button onClick={() => { setResult(null); setUrl(""); setError(""); }}
+              style={{ width: "100%", padding: 14, background: "transparent", border: "1px solid #1e293b", borderRadius: 12, color: "#64748b", fontSize: 14, cursor: "pointer", marginTop: 8 }}>
               ← Analyze another video
             </button>
           </div>
         )}
 
-        {/* Footer */}
         {!result && (
           <div style={{ textAlign: "center", marginTop: 40, color: "#1e293b", fontSize: 12 }}>
-            Uses YouTube Data API v3 · Powered by Claude AI · Your data is never stored
+            Uses YouTube Data API v3 · Powered by GPT-4o Vision · Your data is never stored
           </div>
         )}
       </div>
