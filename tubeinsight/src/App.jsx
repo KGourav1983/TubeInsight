@@ -2,11 +2,14 @@ import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // --- Config ---
-const OPENROUTER_KEY = import.meta.env.VITE_OPENROUTER_KEY;
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
+
+// In dev, Pages Functions run on port 8788 via `wrangler pages dev`
+// In production, they're on the same origin — no prefix needed
+const API = import.meta.env.DEV ? "http://localhost:8788" : "";
 
 // --- Helpers ---
 function extractVideoId(url) {
@@ -37,29 +40,42 @@ function generateReportId(videoId) {
   return `${videoId}-${random}`;
 }
 
-// Get report ID from current URL path: /report/:id
 function getReportIdFromUrl() {
   const match = window.location.pathname.match(/\/report\/([^/]+)/);
   return match ? match[1] : null;
 }
 
-async function callOpenRouter(messages, model = "openai/gpt-4o-mini") {
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+// --- API calls via Pages Functions (keys stay server-side) ---
+async function callAI(messages, model = "openai/gpt-4o-mini") {
+  const res = await fetch(`${API}/ai`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${OPENROUTER_KEY}`,
-      "HTTP-Referer": window.location.origin,
-      "X-Title": "TubeInsight"
-    },
-    body: JSON.stringify({ model, max_tokens: 1500, messages })
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model })
   });
-  const data = await response.json();
-  console.log("OpenRouter response:", data);
-  if (data.error) throw new Error(data.error.message);
+  const data = await res.json();
+  console.log("AI response:", data);
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   const text = data.choices?.[0]?.message?.content || "";
   if (!text) throw new Error("Empty response from AI");
   return text;
+}
+
+async function fetchYouTubeVideo(videoId, youtubeKey) {
+  const res = await fetch(`${API}/youtube?videoId=${videoId}&youtubeKey=${encodeURIComponent(youtubeKey)}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  if (!data.items?.length) throw new Error("Video not found");
+  return data.items[0];
+}
+
+async function fetchYouTubeComments(videoId, youtubeKey) {
+  const res = await fetch(`${API}/comments?videoId=${videoId}&youtubeKey=${encodeURIComponent(youtubeKey)}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  return (data.items || []).map(item =>
+    item.snippet.topLevelComment.snippet.textDisplay
+      .replace(/<[^>]+>/g, "").slice(0, 200)
+  );
 }
 
 function parseJSON(text) {
@@ -163,24 +179,13 @@ function CommentMiner({ videoId, apiKey, savedAnalysis, onAnalysisDone, readOnly
   const [error, setError] = useState("");
   const [activeCluster, setActiveCluster] = useState(savedAnalysis ? 0 : null);
 
-  async function fetchComments() {
-    const res = await fetch(
-      `https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId=${videoId}&maxResults=100&order=relevance&key=${apiKey}`
-    );
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    return (data.items || []).map(item =>
-      item.snippet.topLevelComment.snippet.textDisplay
-        .replace(/<[^>]+>/g, "").slice(0, 200)
-    );
-  }
-
   async function mineComments() {
     setLoading(true);
     setError("");
     try {
-      const comments = await fetchComments();
+      const comments = await fetchYouTubeComments(videoId, apiKey);
       if (!comments.length) throw new Error("No comments found on this video.");
+
       const prompt = `You are a YouTube audience analyst. Analyze these ${comments.length} comments and find patterns.
 
 COMMENTS:
@@ -208,7 +213,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
 }
 Identify 4-6 clusters. Paraphrase comments, never quote directly.`;
 
-      const text = await callOpenRouter([{ role: "user", content: prompt }]);
+      const text = await callAI([{ role: "user", content: prompt }]);
       const result = parseJSON(text);
       setAnalysis(result);
       setActiveCluster(0);
@@ -348,7 +353,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
   "improvements": ["fix 1", "fix 2", "fix 3"],
   "verdict": "One punchy sentence about the thumbnail"
 }`;
-      const text = await callOpenRouter([
+      const text = await callAI([
         { role: "user", content: [
           { type: "image_url", image_url: { url: thumbnailUrl } },
           { type: "text", text: prompt }
@@ -449,7 +454,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
   );
 }
 
-// --- Report View (full results) ---
+// --- Report View ---
 function ReportView({ result, shareUrl, apiKey, readOnly, onUpdateReport }) {
   const v = result.video;
   const a = result.analysis;
@@ -462,14 +467,12 @@ function ReportView({ result, shareUrl, apiKey, readOnly, onUpdateReport }) {
 
   return (
     <div>
-      {/* Share Banner */}
       {shareUrl && <ShareBanner shareUrl={shareUrl} />}
 
-      {/* Read-only badge */}
       {readOnly && (
         <div style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: "12px 20px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 16 }}>👁️</span>
-          <span style={{ fontSize: 13, color: "#64748b" }}>This is a shared report — view only.</span>
+          <span style={{ fontSize: 13, color: "#64748b" }}>This is a shared report — view only. <a href="/" style={{ color: "#6366f1" }}>Analyze your own video →</a></span>
         </div>
       )}
 
@@ -617,7 +620,6 @@ export default function App() {
   const [error, setError] = useState("");
   const [pageLoading, setPageLoading] = useState(true);
 
-  // On mount: check if we're on a /report/:id URL
   useEffect(() => {
     const reportId = getReportIdFromUrl();
     if (reportId) {
@@ -671,16 +673,6 @@ export default function App() {
     return data.id;
   }
 
-  async function fetchYouTubeData(videoId) {
-    const res = await fetch(
-      `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics,contentDetails&id=${videoId}&key=${apiKey}`
-    );
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    if (!data.items?.length) throw new Error("Video not found");
-    return data.items[0];
-  }
-
   async function analyzeVideo(videoData) {
     const { snippet, statistics, contentDetails } = videoData;
     const engagementRate = statistics.viewCount > 0
@@ -712,7 +704,7 @@ Engagement Rate: ${engagementRate}%
   "uploadTimingNote": "Assessment of publish timing"
 }`;
 
-    const text = await callOpenRouter([{ role: "user", content: prompt }]);
+    const text = await callAI([{ role: "user", content: prompt }]);
     return parseJSON(text);
   }
 
@@ -723,12 +715,11 @@ Engagement Rate: ${engagementRate}%
     const videoId = extractVideoId(url);
     if (!videoId) { setError("Couldn't find a video ID in that URL."); return; }
     if (!apiKey) { setError("Please enter your YouTube Data API key."); return; }
-    if (!OPENROUTER_KEY) { setError("VITE_OPENROUTER_KEY missing from .env"); return; }
 
     setLoading(true);
     try {
       setStep("Fetching video data from YouTube...");
-      const videoData = await fetchYouTubeData(videoId);
+      const videoData = await fetchYouTubeVideo(videoId, apiKey);
 
       setStep("Running AI analysis...");
       const analysis = await analyzeVideo(videoData);
@@ -736,8 +727,6 @@ Engagement Rate: ${engagementRate}%
       setStep("Saving report...");
       const reportId = await saveReport(videoData, analysis);
       const newUrl = `${window.location.origin}/report/${reportId}`;
-
-      // Update browser URL without page reload
       window.history.pushState({}, "", `/report/${reportId}`);
 
       setShareUrl(newUrl);
@@ -754,7 +743,6 @@ Engagement Rate: ${engagementRate}%
     setResult(prev => ({ ...prev, [field]: value }));
   }
 
-  // Loading screen while fetching shared report
   if (pageLoading) {
     return (
       <div style={{ minHeight: "100vh", background: "#020617", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui", color: "#64748b", fontSize: 14 }}>
@@ -786,8 +774,6 @@ Engagement Rate: ${engagementRate}%
       </div>
 
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "40px 20px 0" }}>
-
-        {/* Home screen — only show input when no result */}
         {!result && (
           <>
             <div style={{ textAlign: "center", marginBottom: 40 }}>
@@ -829,7 +815,6 @@ Engagement Rate: ${engagementRate}%
           </>
         )}
 
-        {/* Report view */}
         {result && (
           <>
             <ReportView
